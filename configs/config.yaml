@@ -1,0 +1,118 @@
+# ============================================================
+# IPO Overhang Sparse PPCA Project — Main Config
+# ============================================================
+
+project:
+  name: ipo_overhang_sparse_ppca
+  version: "0.1.0"
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  sample:
+    start_year: 2018
+    end_year:   2024
+    # 제외 조건 (Field & Hanka 2001 기준 + 구조적 이유)
+    exclude:
+      spac:             true   # 상장 시 사업 없음
+      direct_listing:   true   # 공모·락업 없음
+      foreign_private:  true   # Form F-1 사용, 다른 파서 필요
+      reit:             true   # 인사이더 매도 구조 상이
+    min_lockup_days:    1      # 락업 없는 케이스 제외
+
+  edgar:
+    base_url: "https://efts.sec.gov/LATEST/search-index"
+    archives_url: "https://www.sec.gov/Archives"
+    rate_limit_per_sec: 9      # SEC 공식 10 req/s에서 여유분 1
+    retry_max: 3
+    timeout_sec: 30
+
+  # 이벤트 타임 윈도우 (락업 해제일 = t=0)
+  event_window:
+    pre_days:  90   # t = -90
+    post_days: 90   # t = +90
+    car_window: [-1, 1]   # 단기 CAR 계산용
+
+# ── 특성(Covariates) ────────────────────────────────────────
+features:
+  # Level A: Rule-based 수치 추출 (424B4)
+  numerical:
+    core:                        # 파이프라인 직접 추출
+      - offer_price
+      - filing_range_low
+      - filing_range_high
+      - public_float_shares
+      - lock_up_days
+      - saleable_shares_180d
+      - underwriter_count
+      - amendment_count          # S-1/A 수정 횟수
+    derived:                     # 수치 파생
+      - unlock_pressure          # saleable / public_float
+      - price_update_abs         # |offer - range_mid| / range_mid
+      - filing_range_width       # (high - low) / mid
+      - relative_offer_size      # public_float / total_shares_outstanding
+      - days_s1_to_424b4         # 수정 속도
+      - overallotment_ratio      # 오버얼랏 비율
+
+  # Level B: LLM-assisted 텍스트 추출
+  llm_labels:
+    - early_release_clause       # bool
+    - unlock_party               # categorical: VC/Founder/Exec/Mixed
+    - exception_wording          # text
+    - narrative_risk_level       # categorical: High/Med/Low
+    - vc_concentration_flag      # bool: VC가 30%+ 보유 여부
+
+  # Level C: 텍스트 기반 파생 (차원 확장용)
+  text_derived:
+    lda_topics: 20               # LDA 토픽 수
+    lm_sentiment: true           # Loughran-McDonald
+    sbert_pca_components: 10     # Sentence-BERT PCA 상위 PC
+
+  # Level D: 매크로 컨텍스트
+  macro:
+    - vix_level                  # 공모일 VIX
+    - vix_slope                  # VIX1M / VIX3M
+    - hy_ig_spread               # 크레딧 스프레드
+    - sector_momentum_6m         # 직전 6개월 섹터 수익률
+
+# ── Sparse PPCA 모델 ─────────────────────────────────────────
+model:
+  ppca:
+    k_max: 8              # 최대 팩터 수 (IC로 결정)
+    k_min: 1
+    max_iter: 500
+    tol: 1.0e-6
+    n_init: 10            # 다중 초기값 (non-convex 대응)
+
+  sparse:
+    lambda_grid_size: 50  # λ 탐색 그리드 수
+    lambda_min_ratio: 1.0e-4
+    penalty: "group_lasso" # group_lasso / ridge
+
+  cv:
+    n_folds: 5
+    criterion: "oos_sharpe"  # oos_mse / oos_sharpe
+
+# ── 평가 ────────────────────────────────────────────────────
+evaluation:
+  span_test:
+    significance_level: 0.05
+    bootstrap_reps: 1000
+
+  car_windows:
+    - [-1, 1]    # 단기
+    - [-5, 5]    # 주간
+    - [-10, 10]  # 2주
+
+  volatility:
+    pre_window:  [-90, -2]
+    post_window: [1, 30]
+    measure: realized_variance   # garch / realized_variance
+
+# ── 저장 경로 ───────────────────────────────────────────────
+paths:
+  raw_html:     data/raw/html
+  interim:      data/interim
+  processed:    data/processed
+  results:      data/results
+  logs:         logs
